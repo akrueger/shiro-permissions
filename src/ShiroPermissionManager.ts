@@ -16,54 +16,65 @@ export class ShiroPermissionManager {
   }
 
   private validateParts(parts: string[]): void {
-    // Single part permissions not allowed
-    if (
-      parts.length === 0 ||
-      parts.length > Constants.MAX_PARTS ||
-      parts.length === 1
-    ) {
-      throw new PermissionFormatError('Permission must have 2 or 3 parts')
+    if (parts.length === 0) {
+      throw new PermissionFormatError('Empty permission string not allowed')
     }
 
-    // No empty parts
-    if (parts.some((part) => !part)) {
-      throw new PermissionFormatError('Empty permission parts are not allowed')
-    }
-
-    // Single wildcard not allowed
     if (parts.length === 1 && parts[0] === '*') {
-      throw new PermissionFormatError(
-        'Single wildcard permission is not allowed'
-      )
+      throw new PermissionFormatError('Single wildcard permission not allowed')
     }
 
-    // Validate each part
+    if (parts.length > Constants.MAX_PARTS) {
+      throw new PermissionFormatError('Too many permission parts')
+    }
+
     const PERMISSION_PART_REGEX = /^[a-zA-Z0-9_,*-]+$/
+    const STRICT_SUBPART_REGEX = /^[a-zA-Z0-9_-]+$/
+
     parts.forEach((part) => {
-      // Length check before any splitting
-      if (part.length > Constants.MAX_PART_LENGTH) {
+      if (!part) {
         throw new PermissionFormatError(
-          'Permission part exceeds maximum length of 50'
+          'Empty permission parts are not allowed'
         )
       }
 
-      // Check for valid characters
+      if (part.length > Constants.MAX_PART_LENGTH) {
+        throw new PermissionFormatError(
+          'Permission part exceeds maximum length'
+        )
+      }
+
       if (!PERMISSION_PART_REGEX.test(part)) {
         throw new PermissionFormatError(
           `Invalid characters in permission part "${part}"`
         )
       }
 
-      // Validate subparts
       const subparts = part.split(',')
+
       if (subparts.some((s) => !s)) {
         throw new PermissionFormatError('Empty subparts are not allowed')
       }
 
-      if (subparts.includes('*') && subparts.length > 1) {
-        throw new PermissionFormatError(
-          'Wildcard cannot be mixed with other subparts'
-        )
+      if (subparts.some((s) => s === '*')) {
+        if (subparts.length > 1) {
+          throw new PermissionFormatError(
+            'Wildcard cannot be mixed with other subparts'
+          )
+        }
+        if (part !== '*') {
+          throw new PermissionFormatError(
+            'Wildcard must be standalone, not part of another string'
+          )
+        }
+      } else {
+        subparts.forEach((subpart) => {
+          if (!STRICT_SUBPART_REGEX.test(subpart)) {
+            throw new PermissionFormatError(
+              `Invalid characters in subpart "${subpart}"`
+            )
+          }
+        })
       }
     })
   }
@@ -102,9 +113,8 @@ export class ShiroPermissionManager {
     try {
       const parts = normalizedPermission.split(':')
       this.validateParts(parts)
-      const result = this.root.implies(parts)
+      const result = this.root.implies(parts, 0, parts.length)
 
-      // Cache the result if space available
       if (this.cache.size < ShiroPermissionManager.CACHE_MAX_SIZE) {
         this.cache.set(normalizedPermission, result)
       }
@@ -116,9 +126,7 @@ export class ShiroPermissionManager {
       }
       throw new PermissionFormatError(
         `Invalid permission check "${permission}"`,
-        {
-          cause: error instanceof Error ? error : undefined
-        }
+        { cause: error instanceof Error ? error : undefined }
       )
     }
   }
@@ -131,87 +139,84 @@ export class ShiroPermissionManager {
 
 class PermissionNode {
   children: Map<string, PermissionNode> = new Map()
-  isWildcard: boolean = false
-  isTerminal: boolean = false
   subparts: Set<string> = new Set()
+  hasWildcard: boolean = false
+  requestedLength: number = 0
 
   addSubpath(parts: string[], index: number = 0): void {
     if (index >= parts.length) {
-      this.isTerminal = true
       return
     }
 
-    const part = parts[index].toLowerCase()
+    this.requestedLength = Math.max(this.requestedLength, parts.length)
+    const part = parts[index]
     const subparts = part.split(',')
 
-    // Handle wildcards
     if (subparts.includes('*')) {
-      this.isWildcard = true
-      this.subparts.clear()
-      this.subparts.add('*')
-    } else {
-      subparts.forEach((subpart) => this.subparts.add(subpart.toLowerCase()))
-    }
-
-    // Mark terminal nodes
-    if (index === parts.length - 1) {
-      this.isTerminal = true
-    }
-
-    // Create child nodes
-    if (index < parts.length - 1) {
-      subparts.forEach((subpart) => {
-        if (!this.children.has(subpart)) {
-          this.children.set(subpart, new PermissionNode())
+      this.hasWildcard = true
+      if (index < parts.length - 1) {
+        let wildcardNode = this.children.get('*')
+        if (!wildcardNode) {
+          wildcardNode = new PermissionNode()
+          this.children.set('*', wildcardNode)
         }
-        this.children.get(subpart)!.addSubpath(parts, index + 1)
+        wildcardNode.addSubpath(parts, index + 1)
+      }
+    } else {
+      subparts.forEach((subpart) => {
+        this.subparts.add(subpart)
+        if (index < parts.length - 1) {
+          let childNode = this.children.get(subpart)
+          if (!childNode) {
+            childNode = new PermissionNode()
+            this.children.set(subpart, childNode)
+          }
+          childNode.addSubpath(parts, index + 1)
+        }
       })
     }
   }
 
-  implies(parts: string[], index: number = 0): boolean {
-    // Base case: we've processed all parts
-    if (index >= parts.length) {
-      return this.isTerminal
-    }
-
-    // Parts length must match exactly (key Shiro requirement)
-    if (parts.length !== index + 1 && !this.children.size) {
+  implies(
+    parts: string[],
+    index: number = 0,
+    requestedLength: number
+  ): boolean {
+    // Parts length must match exactly what was granted
+    if (requestedLength !== this.requestedLength) {
       return false
     }
 
-    const part = parts[index].toLowerCase()
-    const requestedSubparts = part.split(',')
-
-    // Wildcard implies everything at this level
-    if (this.isWildcard) {
-      if (index === parts.length - 1) {
-        return true
-      }
-      // Must have children to imply next level
-      const child = this.children.values().next().value
-      return child ? child.implies(parts, index + 1) : false
+    // If we've processed all parts, we're done
+    if (index >= parts.length) {
+      return true
     }
 
-    // For non-wildcards, check if all requested subparts are contained in our subparts
-    // This matches Shiro's WildcardPermission behavior where each requested
-    // subpart must be implied by the granted permission
-    for (const requestedSubpart of requestedSubparts) {
-      const normalized = requestedSubpart.toLowerCase()
-      if (!this.subparts.has(normalized)) {
+    const part = parts[index]
+    const requestedSubparts = part.split(',')
+
+    // For wildcard nodes
+    if (this.hasWildcard) {
+      const wildcardChild = this.children.get('*')
+      return wildcardChild?.implies(parts, index + 1, requestedLength) ?? true
+    }
+
+    // When checking permissions, each requested subpart must be granted
+    for (const subpart of requestedSubparts) {
+      if (!this.subparts.has(subpart)) {
         return false
       }
     }
 
-    // If we're at the final part and all subparts match, we're done
+    // If this is the last part, we're done
     if (index === parts.length - 1) {
       return true
     }
 
-    // For non-terminal parts, at least one child must imply the remaining parts
+    // For checking child nodes, we only need to find one path that satisfies the permission
     for (const subpart of requestedSubparts) {
-      const child = this.children.get(subpart.toLowerCase())
-      if (child && child.implies(parts, index + 1)) {
+      const child = this.children.get(subpart)
+      if (child?.implies(parts, index + 1, requestedLength)) {
         return true
       }
     }

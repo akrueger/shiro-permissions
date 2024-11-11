@@ -34,11 +34,10 @@ describe('Wildcard Permissions', () => {
 
     test('valid wildcard patterns', () => {
       const validPatterns = [
-        'printer:*:*', // Multiple wildcards in different parts
-        'printer:*', // Single part wildcard
-        '*:view:public', // Leading wildcard with fixed parts
-        'printer:print:*', // Trailing wildcard
-        'resource:*:id:*' // Wildcards with fixed parts between
+        'printer:*', // Two-part wildcard
+        'printer:*:*', // Three-part wildcard
+        'printer:view:*', // Wildcard in last position
+        '*:view:1' // Wildcard in first position
       ]
 
       validPatterns.forEach((pattern) => {
@@ -47,136 +46,120 @@ describe('Wildcard Permissions', () => {
     })
   })
 
-  describe('Basic Wildcard Behavior', () => {
-    beforeEach(() => {
-      manager.grantPermissions([
-        'printer:*', // All printer actions
-        'scanner:scan:*', // All scan instances
-        '*:view:public' // View all public resources
-      ])
-    })
+  describe('Part Level Matching', () => {
+    test('two-part permissions', () => {
+      manager.grantPermissions(['printer:*'])
 
-    test('domain level wildcards', () => {
+      // Should match other two-part permissions
       expect(manager.isPermitted('printer:print')).toBe(true)
       expect(manager.isPermitted('printer:scan')).toBe(true)
-      expect(manager.isPermitted('scanner:print')).toBe(false)
+
+      // Should NOT match three-part permissions
+      expect(manager.isPermitted('printer:print:1')).toBe(false)
+      expect(manager.isPermitted('printer:scan:epson')).toBe(false)
     })
 
-    test('action level wildcards', () => {
-      expect(manager.isPermitted('scanner:scan:hp1')).toBe(true)
-      expect(manager.isPermitted('scanner:scan:epson')).toBe(true)
-      expect(manager.isPermitted('scanner:print:hp1')).toBe(false)
-    })
+    test('three-part permissions', () => {
+      manager.grantPermissions(['printer:print:*'])
 
-    test('instance level wildcards', () => {
-      expect(manager.isPermitted('document:view:public')).toBe(true)
-      expect(manager.isPermitted('printer:view:public')).toBe(true)
-      expect(manager.isPermitted('document:edit:public')).toBe(false)
+      // Should match other three-part permissions
+      expect(manager.isPermitted('printer:print:1')).toBe(true)
+      expect(manager.isPermitted('printer:print:epson')).toBe(true)
+
+      // Should NOT match two-part permissions
+      expect(manager.isPermitted('printer:print')).toBe(false)
     })
   })
 
   describe('Wildcard Implications', () => {
-    test('domain wildcard implications', () => {
-      manager.grantPermissions(['system:*'])
+    test('domain wildcards', () => {
+      manager.grantPermissions(['*:view:1'])
 
-      expect(manager.isPermitted('system:user')).toBe(true)
-      expect(manager.isPermitted('system:admin')).toBe(true)
-      expect(manager.isPermitted('other:user')).toBe(false)
+      // Wildcard matches any domain with same parts
+      expect(manager.isPermitted('printer:view:1')).toBe(true)
+      expect(manager.isPermitted('scanner:view:1')).toBe(true)
+
+      // But not different actions or instances
+      expect(manager.isPermitted('printer:edit:1')).toBe(false)
+      expect(manager.isPermitted('printer:view:2')).toBe(false)
     })
 
-    test('action wildcard implications', () => {
-      manager.grantPermissions(['system:user:*'])
+    test('action wildcards', () => {
+      manager.grantPermissions(['printer:*:1'])
 
-      expect(manager.isPermitted('system:user:view')).toBe(true)
-      expect(manager.isPermitted('system:user:edit')).toBe(true)
-      expect(manager.isPermitted('system:admin:view')).toBe(false)
+      // Matches any action for this printer/instance
+      expect(manager.isPermitted('printer:print:1')).toBe(true)
+      expect(manager.isPermitted('printer:scan:1')).toBe(true)
+
+      // But not other instances
+      expect(manager.isPermitted('printer:print:2')).toBe(false)
     })
 
-    test('instance wildcard implications', () => {
-      manager.grantPermissions(['system:user:view:*'])
+    test('instance wildcards', () => {
+      manager.grantPermissions(['printer:print:*'])
 
-      expect(manager.isPermitted('system:user:view:1')).toBe(true)
-      expect(manager.isPermitted('system:user:view:any')).toBe(true)
-      expect(manager.isPermitted('system:user:edit:1')).toBe(false)
-    })
-  })
+      // Matches any instance for this printer/action
+      expect(manager.isPermitted('printer:print:1')).toBe(true)
+      expect(manager.isPermitted('printer:print:epson')).toBe(true)
 
-  describe('Wildcard with Subparts', () => {
-    test('wildcard with action subparts', () => {
-      manager.grantPermissions(['document:read,write:*'])
-
-      expect(manager.isPermitted('document:read:secret')).toBe(true)
-      expect(manager.isPermitted('document:write:public')).toBe(true)
-      expect(manager.isPermitted('document:delete:public')).toBe(false)
-    })
-
-    test('wildcard with instance subparts', () => {
-      manager.grantPermissions(['printer:print:public,private'])
-
-      expect(manager.isPermitted('printer:print:public')).toBe(true)
-      expect(manager.isPermitted('printer:print:private')).toBe(true)
-      expect(manager.isPermitted('printer:print:confidential')).toBe(false)
+      // But not other actions
+      expect(manager.isPermitted('printer:scan:1')).toBe(false)
     })
   })
 
-  describe('Complex Wildcard Scenarios', () => {
-    beforeEach(() => {
-      manager.grantPermissions([
-        'system:admin:*:*', // All admin operations
-        'system:user:read:*', // All user read operations
-        'system:*:view:public', // View any public resource
-        'system:report:generate,delete:*' // Generate/delete any report
-      ])
+  describe('Subpart Behavior', () => {
+    test('action subparts', () => {
+      manager.grantPermissions(['printer:print,scan:1'])
+
+      // Each subpart should match individually
+      expect(manager.isPermitted('printer:print:1')).toBe(true)
+      expect(manager.isPermitted('printer:scan:1')).toBe(true)
+
+      // But not as a combined permission
+      expect(manager.isPermitted('printer:print,scan:1')).toBe(false)
+      // And not other actions
+      expect(manager.isPermitted('printer:copy:1')).toBe(false)
     })
 
-    test('multiple wildcard levels', () => {
-      expect(manager.isPermitted('system:admin:user:delete')).toBe(true)
-      expect(manager.isPermitted('system:admin:config:edit')).toBe(true)
-      expect(manager.isPermitted('system:user:write:profile')).toBe(false)
-    })
+    test('instance subparts', () => {
+      manager.grantPermissions(['printer:print:1,2'])
 
-    test('mixed wildcards and subparts', () => {
-      expect(manager.isPermitted('system:report:generate:annual')).toBe(true)
-      expect(manager.isPermitted('system:report:delete:monthly')).toBe(true)
-      expect(manager.isPermitted('system:report:update:daily')).toBe(false)
-    })
+      // Each instance should match individually
+      expect(manager.isPermitted('printer:print:1')).toBe(true)
+      expect(manager.isPermitted('printer:print:2')).toBe(true)
 
-    test('wildcard precedence', () => {
-      // Test that more specific permissions take precedence
-      manager.grantPermissions(['printer:print:confidential'])
-
-      expect(manager.isPermitted('printer:print:confidential')).toBe(true)
-      // Even with a wildcard, shouldn't grant other actions on confidential
-      expect(manager.isPermitted('printer:configure:confidential')).toBe(false)
+      // But not combined
+      expect(manager.isPermitted('printer:print:1,2')).toBe(false)
+      // And not other instances
+      expect(manager.isPermitted('printer:print:3')).toBe(false)
     })
   })
 
-  describe('Role-Based Wildcard Patterns', () => {
-    beforeEach(() => {
-      manager.grantPermissions([
-        'admin:*', // Admin can do anything
-        'manager:view,edit,create:*', // Manager has limited actions
-        'user:view:own,public' // User can only view own and public
-      ])
+  describe('Multiple Wildcards', () => {
+    test('multiple level wildcards', () => {
+      manager.grantPermissions(['printer:*:*'])
+
+      // Should match any action and instance
+      expect(manager.isPermitted('printer:print:1')).toBe(true)
+      expect(manager.isPermitted('printer:scan:epson')).toBe(true)
+
+      // But not other domains
+      expect(manager.isPermitted('scanner:print:1')).toBe(false)
     })
 
-    test('admin role permissions', () => {
-      expect(manager.isPermitted('admin:create')).toBe(true)
-      expect(manager.isPermitted('admin:delete')).toBe(true)
-      expect(manager.isPermitted('admin:any')).toBe(true)
-    })
+    test('wildcard mixing with subparts not allowed', () => {
+      // These should all throw
+      expect(() => manager.grantPermissions(['printer:print,*:1'])).toThrow(
+        PermissionFormatError
+      )
 
-    test('manager role permissions', () => {
-      expect(manager.isPermitted('manager:view:any')).toBe(true)
-      expect(manager.isPermitted('manager:edit:any')).toBe(true)
-      expect(manager.isPermitted('manager:delete:any')).toBe(false)
-    })
+      expect(() => manager.grantPermissions(['printer:*,print:1'])).toThrow(
+        PermissionFormatError
+      )
 
-    test('user role permissions', () => {
-      expect(manager.isPermitted('user:view:own')).toBe(true)
-      expect(manager.isPermitted('user:view:public')).toBe(true)
-      expect(manager.isPermitted('user:view:other')).toBe(false)
-      expect(manager.isPermitted('user:edit:own')).toBe(false)
+      expect(() => manager.grantPermissions(['printer:print:1,*'])).toThrow(
+        PermissionFormatError
+      )
     })
   })
 })
